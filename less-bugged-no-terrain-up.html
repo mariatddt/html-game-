@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sphere Runner</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#1a1a2e;
+  display:flex; align-items:center; justify-content:center;
+  height:100vh; overflow:hidden;
+  font-family:'Segoe UI',sans-serif;
+}
+#wrap { position:relative; width:900px; height:540px; }
+canvas { display:block; border-radius:16px; box-shadow:0 0 60px rgba(0,0,0,.6); }
+ 
+#hud {
+  position:absolute; top:0; left:0; right:0;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 16px; pointer-events:none; z-index:5;
+}
+.pill {
+  background:#2272b8; color:#fff; font-weight:700; font-size:17px;
+  padding:7px 22px; border-radius:30px;
+  box-shadow:0 2px 12px rgba(0,0,0,.3);
+}
+#diamondPill {
+  display:flex; align-items:center; gap:6px;
+  background:#2272b8; color:#fff; font-weight:700; font-size:15px;
+  padding:7px 16px; border-radius:30px;
+  box-shadow:0 2px 12px rgba(0,0,0,.3);
+}
+#pauseBtn {
+  pointer-events:all; cursor:pointer;
+  background:#2272b8; border:none; border-radius:30px;
+  padding:7px 20px; display:flex; align-items:center; gap:8px;
+  color:#fff; font-weight:700; font-size:15px;
+  box-shadow:0 2px 12px rgba(0,0,0,.3); transition:background .15s;
+}
+#pauseBtn:hover { background:#1a5c9a; }
+.picon { display:flex; gap:3px; }
+.picon span { display:block; width:3px; height:13px; background:#fff; border-radius:2px; }
+ 
+#progressBar {
+  position:absolute; bottom:0; left:0; right:0; height:5px;
+  background:rgba(0,0,0,.12); border-radius:0 0 16px 16px; overflow:hidden; z-index:5;
+}
+#progressFill {
+  height:100%; background:linear-gradient(90deg,#c97b3a,#e6a84e); width:0%;
+  border-radius:0 0 16px 16px;
+}
+ 
+#overlay, #pauseOverlay {
+  position:absolute; inset:0; background:rgba(250,235,215,.96);
+  border-radius:16px; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:16px; z-index:10;
+}
+#pauseOverlay { display:none; }
+#overlay h1, #pauseOverlay h2 { font-size:48px; font-weight:900; color:#c97b3a; }
+#overlay p { font-size:15px; color:#7a6050; text-align:center; max-width:380px; line-height:1.65; }
+.hint-box {
+  font-size:14px; color:#a08878;
+  background:rgba(201,123,58,.1); border-radius:10px;
+  padding:10px 20px; text-align:center; line-height:1.8;
+}
+#finalScore { font-size:21px; color:#c97b3a; font-weight:800; display:none; }
+.big-btn {
+  background:#2272b8; color:#fff; border:none;
+  padding:13px 46px; border-radius:30px;
+  font-size:18px; font-weight:700; cursor:pointer;
+  box-shadow:0 4px 16px rgba(34,114,184,.4);
+  transition:transform .1s, background .2s;
+}
+.big-btn:hover { background:#1a5c9a; transform:scale(1.04); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="900" height="540"></canvas>
+ 
+  <div id="hud">
+    <div style="width:120px"></div>
+    <div class="pill">Score: <span id="scoreVal">0</span></div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div id="diamondPill">
+        <svg width="12" height="16" viewBox="0 0 12 16"><polygon points="6,0 12,6 6,16 0,6" fill="#f5d44a"/></svg>
+        <span id="diamondVal">0</span>
+      </div>
+      <button id="pauseBtn">
+        <div class="picon"><span></span><span></span></div>Pause
+      </button>
+    </div>
+  </div>
+ 
+  <div id="progressBar"><div id="progressFill"></div></div>
+ 
+  <div id="overlay">
+    <h1>Sphere Runner</h1>
+    <p>Test version of the computer game on the Cynteract app</p>
+    <div class="hint-box">
+      Hold <b>SPACE</b> to shrink and pass through obstacles.<br>
+      Release to grow. Collect diamonds!
+    </div>
+    <div id="finalScore"></div>
+    <button class="big-btn" id="actionBtn">Start Game</button>
+  </div>
+ 
+  <div id="pauseOverlay">
+    <h2>Paused</h2>
+    <button class="big-btn" id="resumeBtn">Resume</button>
+  </div>
+</div>
+ 
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 900, H = 540;
+const GROUND_Y  = H - 80;   // top of the white floor
+const SPHERE_X  = 200;       // sphere is fixed horizontally
+const R_BIG     = 28;
+const R_SMALL   = 11;
+const GAME_SECS = 120;
+
+/* Perfect slower gameplay pacing */
+const SPEED_MIN = 1.5;
+const SPEED_MAX = 1.9;
+ 
+/* ─── palette ─────────────────────────────── */
+const BG1='#fae8d4', BG2='#f0d4b8';
+const SP_BASE='#c07238', SP_MID='#d4844a', SP_LIT='#dfa06a';
+ 
+/* ─── state ──────────────────────────────── */
+let gs='menu';
+let score=0, gems=0, elapsed=0, lastTs=0;
+let keys={};
+let animId;
+ 
+/* sphere */
+let sp={y:0, vy:0, r:R_BIG, targetR:R_BIG};
+ 
+/* world objects */
+let obstacles=[], collectibles=[], clouds=[], blobs=[];
+let particles=[];
+/* trail: stores world-x positions so it scrolls WITH the world */
+let trailPts=[];   // [{wx, y, r}]  wx = world x coordinate
+let worldX=0;      // how many px the world has scrolled total
+ 
+/* ─── Level Up / Encouragement Event State ─── */
+let levelUpTriggered = false;
+let levelUpEvent = {
+  active: false,
+  timer: 0,
+  duration: 4.5,      // Total visible run time
+  yOffset: 160,       // Current animation bounce height (starts off-screen)
+  targetY: 160,       // Where it wants to slide to
+  textAlpha: 0,       // Fade-in for the text bubble
+  text: "Great work, don't stop now"
+};
+
+/* timers */
+let tObs=0.8, tGem=2.0, tCloud=0.0;
+ 
+/* ─── helpers ─────────────────────────────── */
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+ 
+function worldToScreen(wx){ return wx - worldX + SPHERE_X; }
+ 
+/* circle vs AABB  (all in screen coords) */
+function circleRect(cx,cy,cr, rx,ry,rw,rh){
+  const nx=clamp(cx,rx,rx+rw), ny=clamp(cy,ry,ry+rh);
+  return (cx-nx)**2+(cy-ny)**2 < cr*cr;
+}
+ 
+/* ─── reset ───────────────────────────────── */
+function reset(){
+  score=0; gems=0; elapsed=0; worldX=0;
+  keys={};
+  sp={y:GROUND_Y-R_BIG, vy:0, r:R_BIG, targetR:R_BIG};
+  obstacles=[]; collectibles=[]; particles=[];
+  trailPts=[];
+  clouds=[]; blobs=[];
+  tObs=0.9; tGem=2.2; tCloud=0;
+  for(let i=0;i<5;i++) addCloud(Math.random()*W);
+  for(let i=0;i<4;i++) addBlob(Math.random()*W);
+  levelUpTriggered = false;
+  levelUpEvent.active = false;
+  levelUpEvent.yOffset = 160;
+  levelUpEvent.targetY = 160;
+  levelUpEvent.textAlpha = 0;
+}
+ 
+/* ─── spawners ────────────────────────────── */
+/* ─── addCloud ──────────────── */
+function addCloud(sx){
+  const wx = sx + worldX - SPHERE_X;
+  const puffs = [];
+  
+  // Structured horizontal overlap matrix to keep it beautifully fluffy, not triangular
+  puffs.push({dx: 0, dy: 0, r: 25});
+  puffs.push({dx: -16, dy: 2, r: 23});
+  puffs.push({dx: 16, dy: 2, r: 23});
+  puffs.push({dx: -34, dy: 4, r: 18});
+  puffs.push({dx: 34, dy: 4, r: 18});
+  puffs.push({dx: -50, dy: 6, r: 14});
+  puffs.push({dx: 50, dy: 6, r: 14});
+  
+  const cloudScale = 0.9 + Math.random() * 0.3;
+  puffs.forEach(p => {
+    p.dx *= cloudScale;
+    p.dy *= cloudScale;
+    p.r  *= cloudScale;
+  });
+
+  clouds.push({
+    wx, 
+    y: 40 + Math.random() * 110, 
+    puffs, 
+    spd: 0.15 + Math.random() * 0.2 // Gentle individual parallax drift
+  });
+}
+ 
+function addBlob(sx){
+  const wx=sx+worldX-SPHERE_X;
+  blobs.push({wx, y:80+Math.random()*(H-220), r:50+Math.random()*90,
+              a:0.03+Math.random()*0.04, spd:1.0+Math.random()*0.7});
+}
+ 
+function spawnObs(){
+  const sx0 = W + 80;
+  
+  // Anti-clipping runway verification spacer check
+  for(const o of obstacles){
+    if(o.sx + o.w + 140 > sx0){
+      return false;
+    }
+  }
+
+  const prog=clamp(elapsed/GAME_SECS,0,1);
+  const pool=[
+    {t:'bar_low', w:50},
+    {t:'gate',    w:50},
+  ];
+  const tot=pool.reduce((s,a)=>s+a.w,0);
+  let r=Math.random()*tot;
+  let type=pool[pool.length-1].t;
+  for(const p of pool){r-=p.w; if(r<=0){type=p.t;break;}}
+ 
+  if(type==='bar_low'){
+    const bh = 18;
+    const by = GROUND_Y - R_BIG * 1.6 - bh;
+    const maxR = Math.floor((GROUND_Y - by - bh) / 2) - 2;
+    const bw = 130 + Math.random() * 80;
+    obstacles.push({sx:sx0, y:by, w:bw, h:bh, maxR});
+  }
+  else if(type==='gate'){
+    const gapH  = R_SMALL * 2 + 6;
+    const gapMid = GROUND_Y - R_BIG * 0.9;
+    const gt = gapMid - gapH / 2;
+    const gb = gapMid + gapH / 2;
+    const maxR = Math.floor(gapH / 2) - 2;
+    const ww = 22;
+    obstacles.push({sx:sx0, y:0,  w:ww, h:gt,    maxR});
+    obstacles.push({sx:sx0, y:gb, w:ww, h:H - gb, maxR});
+  }
+  return true;
+}
+ 
+function spawnGem(){
+  const vs=[
+    {dy:-(R_BIG+18),   small:false},
+    {dy:-(R_SMALL+12), small:true },
+  ];
+
+  for(let i=0; i<10; i++){ // Increased iteration attempts to ensure a safe spot is found
+    const v=vs[Math.floor(Math.random()*vs.length)];
+    const sx = W + 40 + Math.random() * 140;
+    const y = GROUND_Y + v.dy;
+    
+    // Check if the diamond footprint clips into any obstacle bounding boxes with safer padding
+    let overlap = false;
+    const gemPaddingX = 35; // Wider horizontal padding to prevent edge clipping
+    const gemPaddingY = 25;
+
+    for(const o of obstacles){
+      if(sx + gemPaddingX > o.sx && 
+         sx - gemPaddingX < o.sx + o.w && 
+         y + gemPaddingY > o.y && 
+         y - gemPaddingY < o.y + o.h){
+        overlap = true;
+        break;
+      }
+    }
+    
+    if(!overlap){
+      collectibles.push({sx, y, small:v.small, pulse:Math.random()*Math.PI*2, done:false});
+      break; // Safe spot found, stop searching
+    }
+  }
+}
+ 
+function burst(x,y,col,n,spd){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2,v=1+Math.random()*spd;
+    particles.push({x,y,vx:Math.cos(a)*v,vy:Math.sin(a)*v-1.2,
+                    r:2+Math.random()*3,col,life:1,dc:0.025+Math.random()*0.03});
+  }
+}
+ 
+/* ─── update ──────────────────────────────── */
+function update(dt){
+  elapsed+=dt;
+  const prog  = clamp(elapsed/GAME_SECS, 0, 1);
+  const speed = lerp(SPEED_MIN, SPEED_MAX, prog);
+  const wantSmall = !!(keys[' '] || keys['Space']);
+ 
+  /* ── 1. Size & Growth Prevention Check ────── */
+  if (wantSmall) {
+    sp.targetR = R_SMALL;
+  } else {
+    // Look ahead to check if growing would push the sphere footprint inside an obstacle
+    let nextR = lerp(sp.r, R_BIG, 0.14);
+    let nextY = sp.y;
+    
+    const projectedFloor = GROUND_Y - nextR;
+    if (nextY >= projectedFloor || sp.y === (GROUND_Y - sp.r)) {
+      nextY = projectedFloor;
+    }
+    
+    let wouldOverlap = false;
+    for (const o of obstacles) {
+      if (circleRect(SPHERE_X, nextY, nextR, o.sx, o.y, o.w, o.h)) {
+        if (nextR > o.maxR) {
+          wouldOverlap = true;
+          break;
+        }
+      }
+    }
+    
+    // Lock size down if growing causes an overlapping block collision
+    if (wouldOverlap) {
+      sp.targetR = sp.r;
+    } else {
+      sp.targetR = R_BIG;
+    }
+  }
+  sp.r = lerp(sp.r, sp.targetR, 0.14);
+ 
+  /* ── 2. Gravity / floor ─────────────────────────────────────── */
+  sp.vy += 900 * dt;
+  sp.y  += sp.vy * dt;
+  const floor = GROUND_Y - sp.r;
+  if(sp.y >= floor){ sp.y = floor; sp.vy = 0; }
+ 
+  /* ── 3. Collision (Pure 1:1 sp.r Check) ──────────────────────── */
+  let anyBlocked = false;
+  for(const o of obstacles){
+    if(!circleRect(SPHERE_X, sp.y, sp.r, o.sx, o.y, o.w, o.h)) continue;
+    if(sp.r > o.maxR){
+      anyBlocked = true;
+      break;
+    }
+  }
+ 
+  /* ── 4. Everything moves ONLY when nothing is blocking ─────────── */
+  if(!anyBlocked){
+    obstacles.forEach(o    => { o.sx -= speed; });
+    collectibles.forEach(c => { c.sx -= speed; });
+    clouds.forEach(c       => { c.wx -= c.spd; });
+    worldX += speed;
+    score  += dt * 3 * (1 + prog * 0.8);
+
+    tObs -= dt; tGem -= dt;
+    if(tObs   <= 0){ 
+      if(spawnObs()) { tObs = 1.5 - prog*0.55 + Math.random()*0.5; } 
+      else { tObs = 0.1; }
+    }
+    if(tGem   <= 0){ spawnGem(); tGem = 2.0 + Math.random()*1.5; }
+  }
+ 
+  /* ── 5. Trail ───────────────────────────────────────────────── */
+  trailPts.unshift({wx: worldX, y: sp.y, r: sp.r});
+  if(trailPts.length > 120) trailPts.pop();
+ 
+  /* ── 6. Timers & background spawning ────────────────────────── */
+  tCloud -= dt;
+  if(tCloud <= 0){ addCloud(W+160); addBlob(W+80); tCloud = 4.0 + Math.random()*3.0; }
+ 
+  /* ── 7. Cull off-screen ─────────────────────────────────────── */
+  obstacles    = obstacles   .filter(o => o.sx + o.w > -60);
+  collectibles = collectibles.filter(c => !c.done && c.sx > -60);
+  const cullWX = worldX - (SPHERE_X + 160);
+  trailPts = trailPts.filter(t => t.wx > cullWX - 20);
+  clouds   = clouds  .filter(c => worldToScreen(c.wx) > -120);
+  blobs    = blobs   .filter(b => b.wx + b.r > cullWX);
+ 
+  /* ── 9. Gem collection ──────────────────────────────────────── */
+  for(const g of collectibles){
+    if(g.done) continue;
+    // REMOVED size restriction check so any size sphere can collect any size diamond
+    if(Math.hypot(SPHERE_X - g.sx, sp.y - g.y) < sp.r + 12){
+      g.done = true; gems++; score += 20;
+      burst(g.sx, g.y, '#f5d44a', 14, 3.5);
+    }
+  }
+ 
+  /* ── 10. Particles ──────────────────────────────────────────── */
+  particles.forEach(p => { p.x+=p.vx; p.y+=p.vy; p.vy+=0.15; p.life-=p.dc; });
+  particles = particles.filter(p => p.life > 0);
+ 
+/* ── 11. Scripted Level Up Moment Tracking ── */
+  // Triggers exactly at 1.5 minutes (90 seconds) into the match
+  if (!levelUpTriggered && elapsed >= 90) {
+    levelUpTriggered = true;
+    levelUpEvent.active = true;
+    levelUpEvent.timer = levelUpEvent.duration;
+    levelUpEvent.targetY = 0; // Slide up into view
+  }
+
+  if (levelUpEvent.active) {
+    levelUpEvent.timer -= dt;
+    
+    // Smoothly slide out/in using linear interpolation
+    levelUpEvent.yOffset = lerp(levelUpEvent.yOffset, levelUpEvent.targetY, 0.1);
+    
+    // Fade the text bubble in once fully standing, then out before leaving
+    if (levelUpEvent.timer > 0.8 && levelUpEvent.yOffset < 15) {
+      levelUpEvent.textAlpha = lerp(levelUpEvent.textAlpha, 1, 0.15);
+    } else if (levelUpEvent.timer <= 0.8) {
+      levelUpEvent.textAlpha = lerp(levelUpEvent.textAlpha, 0, 0.2);
+    }
+
+    // Time's up! Command the character to drop back below the frame edge
+    if (levelUpEvent.timer <= 0.5) {
+      levelUpEvent.targetY = 160;
+    }
+    if (levelUpEvent.timer <= 0 && levelUpEvent.yOffset >= 155) {
+      levelUpEvent.active = false; // Clean up memory footprint completely
+    }
+  }
+
+  if(elapsed >= GAME_SECS) endGame();
+}
+ 
+/* ─── draw ────────────────────────────────── */
+function drawBg(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,BG1); g.addColorStop(1,BG2);
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  for(const b of blobs){
+    const sx=worldToScreen(b.wx);
+    ctx.save(); ctx.globalAlpha=b.a;
+    ctx.beginPath(); ctx.arc(sx,b.y,b.r,0,Math.PI*2);
+    ctx.fillStyle='#c07238'; ctx.fill(); ctx.restore();
+  }
+}
+ 
+/* ─── Change your drawClouds function to this: ────────────── */
+function drawClouds(){
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0,0,W,H); ctx.clip();
+  
+  for(const c of clouds){
+    const cx = worldToScreen(c.wx);
+    ctx.save();
+    
+    // Smooth atmospheric under-cloud shadows matching the image baseline
+    ctx.shadowColor = 'rgba(185, 150, 120, 0.25)';
+    ctx.shadowBlur = 12; 
+    ctx.shadowOffsetY = 6;
+    
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
+    
+    // Draws them back as a single solid path for clean silhouettes without inner seams
+    ctx.beginPath();
+    for(const p of c.puffs){
+      ctx.moveTo(cx + p.dx + p.r, c.y + p.dy);
+      ctx.arc(cx + p.dx, c.y + p.dy, p.r, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+ 
+function drawGround(){
+  ctx.save();
+  ctx.shadowColor='rgba(0,0,0,0.10)'; ctx.shadowBlur=14; ctx.shadowOffsetY=-3;
+  ctx.fillStyle='#ffffff';
+  ctx.fillRect(0,GROUND_Y+14,W,H-GROUND_Y-14);
+  ctx.restore();
+  ctx.fillStyle='rgba(230,168,78,0.18)';
+  ctx.fillRect(0,GROUND_Y+14,W,4);
+}
+ 
+function drawObstacles(){
+  ctx.save();
+  for(const o of obstacles){
+    const sx=o.sx;
+    ctx.shadowColor='rgba(0,0,0,0.12)'; ctx.shadowBlur=8; ctx.shadowOffsetY=3;
+    ctx.fillStyle='#ffffff';
+    ctx.beginPath();
+    if(ctx.roundRect) ctx.roundRect(sx,o.y,o.w,o.h,4);
+    else ctx.rect(sx,o.y,o.w,o.h);
+    ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.fillStyle='rgba(255,255,255,0.5)';
+    ctx.fillRect(sx+4,o.y+2,o.w-8,3);
+    /* hint */
+    if(o.maxR < R_BIG && sx<420 && sx>-o.w){
+      const a=clamp((420-sx)/260,0,1);
+      ctx.globalAlpha=a*0.6;
+      ctx.fillStyle='#c97b3a'; ctx.font='bold 11px Segoe UI';
+      ctx.textAlign='center';
+      ctx.fillText('↓ shrink',sx+o.w/2,o.y-7);
+      ctx.globalAlpha=1;
+    }
+  }
+  ctx.restore();
+}
+ 
+function drawTrail(){
+  if(trailPts.length<10) return;
+  ctx.save();
+  ctx.lineCap='round'; ctx.lineJoin='round';
+ 
+  const segs=trailPts.length-1;
+ 
+  /* ─── Pass 1: Upper Ribbon (Orange/Brown Base with White Core) ─── */
+  // It curves slightly upwards and ripples based on horizontal world position
+  for(let i=segs; i>=1; i--){
+    const t=i/segs;
+    const alpha=(1-t)*0.78;
+    
+    // Calculate a graceful upward trajectory wave that starts at 0 right at the sphere (t=0)
+    const waveY = 16 * Math.sin(trailPts[i].wx * 0.05) * t;
+    
+    const x1=trailPts[i].wx   - worldX + SPHERE_X;
+    const x0=trailPts[i-1].wx - worldX + SPHERE_X;
+    const y1=trailPts[i].y + waveY - (t * 8); // Pulls upward over distance
+    const y0=trailPts[i-1].y + (16 * Math.sin(trailPts[i-1].wx * 0.05) * ((i-1)/segs)) - (((i-1)/segs) * 8);
+    
+    const lw=clamp((1-t)*4.5, 0.6, 4.5);
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x0,y0);
+    ctx.strokeStyle=`rgba(192,114,56,${alpha})`;
+    ctx.lineWidth=lw;
+    ctx.stroke();
+  }
+  
+  // Outer layer inner white core (Upper)
+  for(let i=segs; i>=1; i--){
+    const t=i/segs;
+    const alpha=(1-t)*0.55;
+    const waveY = 16 * Math.sin(trailPts[i].wx * 0.05) * t;
+    const x1=trailPts[i].wx   - worldX + SPHERE_X;
+    const x0=trailPts[i-1].wx - worldX + SPHERE_X;
+    const y1=trailPts[i].y + waveY - (t * 8) - 1.5;
+    const y0=trailPts[i-1].y + (16 * Math.sin(trailPts[i-1].wx * 0.05) * ((i-1)/segs)) - (((i-1)/segs) * 8) - 1.5;
+    
+    const lw=clamp((1-t)*2.0, 0.4, 2.0);
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x0,y0);
+    ctx.strokeStyle=`rgba(255,245,235,${alpha})`;
+    ctx.lineWidth=lw;
+    ctx.stroke();
+  }
+
+  /* ─── Pass 2: Lower Ribbon (Bright White, Symmetrical Opposite Trajectory) ─── */
+  // It anchors perfectly to the sphere, but gracefully swoops downward and ripples oppositely
+  for(let i=segs; i>=1; i--){
+    const t=i/segs;
+    const alpha=(1-t)*0.85; 
+    
+    // Inverted wave phase (* -1) so it splits away from the orange line visually
+    const waveY = 16 * Math.sin(trailPts[i].wx * 0.05 + Math.PI) * t;
+    
+    const x1=trailPts[i].wx   - worldX + SPHERE_X;
+    const x0=trailPts[i-1].wx - worldX + SPHERE_X;
+    const y1=trailPts[i].y + waveY + (t * 12); // Sweeps downward over distance
+    const y0=trailPts[i-1].y + (16 * Math.sin(trailPts[i-1].wx * 0.05 + Math.PI) * ((i-1)/segs)) + (((i-1)/segs) * 12);
+    
+    const lw=clamp((1-t)*3.2, 0.8, 3.2);
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x0,y0);
+    ctx.strokeStyle=`rgba(255,255,255,${alpha})`;
+    ctx.lineWidth=lw;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+ 
+function drawSphere(){
+  const x=SPHERE_X, y=sp.y, r=sp.r;
+ 
+  /* main body */
+  const g=ctx.createRadialGradient(x-r*0.25,y-r*0.22,r*0.1, x+r*0.1,y+r*0.1,r*1.05);
+  g.addColorStop(0, SP_LIT);
+  g.addColorStop(0.45, SP_MID);
+  g.addColorStop(1,   SP_BASE);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=g; ctx.fill();
+ 
+  /* subtle dark rim */
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.strokeStyle='rgba(120,60,20,0.18)'; ctx.lineWidth=1.5; ctx.stroke();
+ 
+  /* small specular dot top-left */
+  ctx.beginPath();
+  ctx.arc(x-r*0.30, y-r*0.30, r*0.18, 0, Math.PI*2);
+  ctx.fillStyle='rgba(255,245,235,0.38)'; ctx.fill();
+}
+ 
+function drawGems(ts){
+  for(const g of collectibles){
+    if(g.done) continue;
+    const sx=g.sx;
+    const pulse=0.9+0.1*Math.sin(ts*2.8+g.pulse);
+    const hw=8*pulse;   
+    const ht=15*pulse;  
+    const mid=ht*0.28;  
+    ctx.save(); ctx.translate(sx, g.y);
+ 
+    // Intense diamond golden glow halo base
+    ctx.shadowColor='#f5d44a'; ctx.shadowBlur=22;
+ 
+    /* ─── NEW: Bling Shimmer Starburst Rays ─── */
+    ctx.save();
+    // Rotate the overall sparkle profile slowly over time
+    ctx.rotate(ts * 0.45 + g.pulse);
+    ctx.fillStyle = 'rgba(255, 235, 170, 0.45)';
+    
+    // Draw 4 long principal points & 4 shorter diagonal points
+    for(let i = 0; i < 8; i++) {
+      ctx.rotate(Math.PI / 4);
+      const rayLen = (i % 2 === 0) ? (24 * pulse) : (14 * pulse);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-2.5, -rayLen * 0.2);
+      ctx.lineTo(0, -rayLen); // Tip of ray
+      ctx.lineTo(2.5, -rayLen * 0.2);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+
+    /* ─── NEW: Pixie Dust Sparkle Particles ─── */
+    ctx.fillStyle = 'rgba(255, 250, 210, 0.85)';
+    for(let i = 0; i < 4; i++) {
+      // Use the unique individual gem pulse to create stable, offsets around the gem
+      const angle = (i * Math.PI / 2) + (ts * 0.8) + (g.pulse * i);
+      const orbitDist = 18 + 5 * Math.sin(ts * 2 + i);
+      const px = Math.cos(angle) * orbitDist;
+      const py = Math.sin(angle) * orbitDist * 1.2; // Taller orbit layout
+      const size = 1.2 + 0.6 * Math.sin(ts * 4 + i);
+      
+      ctx.beginPath();
+      ctx.arc(px, py, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+ 
+    /* ─── Main Faceted Gem Body ─── */
+    ctx.beginPath();
+    ctx.moveTo(0, -ht);          
+    ctx.lineTo( hw, -mid);       
+    ctx.lineTo( hw*0.7, mid);    
+    ctx.lineTo(0,  ht);          
+    ctx.lineTo(-hw*0.7, mid);    
+    ctx.lineTo(-hw, -mid);       
+    ctx.closePath();
+ 
+    const dg=ctx.createLinearGradient(0,-ht,0,ht);
+    dg.addColorStop(0,'#fff0a0');
+    dg.addColorStop(0.25,'#f9d84a');
+    dg.addColorStop(0.6,'#e8a820');
+    dg.addColorStop(1,'#c07800');
+    ctx.fillStyle=dg; ctx.fill();
+ 
+    ctx.strokeStyle='rgba(120,70,0,0.65)'; ctx.lineWidth=1.5; ctx.stroke();
+ 
+    ctx.shadowBlur=0;
+    ctx.beginPath();
+    ctx.moveTo(0,-ht);
+    ctx.lineTo(hw,-mid);
+    ctx.lineTo(0,-mid*0.3);
+    ctx.lineTo(-hw,-mid);
+    ctx.closePath();
+    ctx.fillStyle='rgba(255,255,200,0.38)'; ctx.fill();
+ 
+    ctx.restore();
+  }
+}
+ 
+function drawParticles(){
+  ctx.save();
+  for(const p of particles){
+    ctx.globalAlpha=p.life;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r*p.life,0,Math.PI*2);
+    ctx.fillStyle=p.col; ctx.fill();
+  }
+  ctx.restore();
+}
+ 
+function draw(ts){
+  ctx.clearRect(0,0,W,H);
+  drawBg(); drawClouds(); drawGround();
+  drawObstacles(); drawTrail();
+  drawGems(ts/1000);
+  drawSphere(); drawParticles();
+  
+  /* Render our milestone companion directly above gameplay layers */
+  if (levelUpEvent.active) {
+    drawEncouragementMascot(ts / 1000);
+  }
+}
+function drawEncouragementMascot(timeSecs) {
+  // Base configuration coordinates matching bottom-left layout
+  const baseX = 90;
+  const baseY = H - 66 + levelUpEvent.yOffset; 
+  
+  // Create an organic idle squish bounce using standard canvas scaling matrices
+  const bounceY = 4 * Math.sin(timeSecs * 7);
+  const squishX = 1 + 0.03 * Math.sin(timeSecs * 7);
+  
+  ctx.save();
+  ctx.translate(baseX, baseY + bounceY);
+  ctx.scale(squishX, 1 - (squishX - 1));
+
+  /* ─── Text Bubble Draw ─── */
+  if (levelUpEvent.textAlpha > 0.02) {
+    ctx.save();
+    ctx.globalAlpha = levelUpEvent.textAlpha;
+    // Mirroring original video placement offsets
+    ctx.translate(65, -100 - bounceY); 
+    
+    // Draw bubble backing box
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    if(ctx.roundRect) ctx.roundRect(0, 0, 210, 44, 12);
+    else ctx.rect(0, 0, 210, 44);
+    ctx.fill();
+    
+    // Draw small pointed speech indicator pointer notch
+    ctx.beginPath();
+    ctx.moveTo(-10, 22);
+    ctx.lineTo(0, 14);
+    ctx.lineTo(0, 30);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Internal label typesetting
+    ctx.fillStyle = "#2d2018";
+    ctx.font = "bold 13px 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(levelUpEvent.text, 105, 22);
+    ctx.restore();
+  }
+
+  /* ─── Character Fluffy Body ─── */
+  ctx.fillStyle = "#e67a3a"; // Fluffy rust orange base
+  const puffCount = 10;
+  for (let i = 0; i < puffCount; i++) {
+    const angle = (i / puffCount) * Math.PI * 2;
+    const px = Math.cos(angle) * 32;
+    const py = Math.sin(angle) * 28 - 20;
+    ctx.beginPath();
+    ctx.arc(px, py, 20, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.beginPath();
+  ctx.arc(0, -20, 35, 0, Math.PI * 2);
+  ctx.fill();
+
+  /* ─── Cool Sunglasses ─── */
+  ctx.fillStyle = "#201a18"; // Dark frames
+  // Left lens
+  ctx.beginPath(); ctx.arc(-14, -26, 12, 0, Math.PI); ctx.fill();
+  ctx.fillRect(-26, -26, 24, 3);
+  // Right lens
+  ctx.beginPath(); ctx.arc(14, -26, 12, 0, Math.PI); ctx.fill();
+  ctx.fillRect(2, -26, 24, 3);
+  // Connector bridge
+  ctx.fillRect(-4, -26, 8, 3);
+  
+  // Sleek white spec reflections across glasses
+  ctx.strokeStyle = "rgba(255,255,255,0.45)";
+  ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(-20, -21); ctx.lineTo(-12, -17); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(8, -21);  ctx.lineTo(16, -17); ctx.stroke();
+
+  /* ─── Happy Smile ─── */
+  ctx.strokeStyle = "#201a18";
+  ctx.lineWidth = 3;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.arc(0, -10, 8, 0.1, Math.PI - 0.1);
+  ctx.stroke();
+
+  ctx.restore();
+}
+ 
+/* ─── loop ────────────────────────────────── */
+function loop(ts){
+  if(gs!=='playing') return;
+  const dt=clamp((ts-lastTs)/1000,0,0.05);
+  lastTs=ts;
+  update(dt); draw(ts);
+  document.getElementById('scoreVal').textContent=Math.floor(score);
+  document.getElementById('diamondVal').textContent=gems;
+  document.getElementById('progressFill').style.width=(elapsed/GAME_SECS*100).toFixed(1)+'%';
+  
+  animId = requestAnimationFrame(loop);
+}
+ 
+/* ─── game flow ───────────────────────────── */
+function startGame(){
+  cancelAnimationFrame(animId); 
+  reset(); gs='playing';
+  document.getElementById('overlay').style.display='none';
+  document.getElementById('pauseOverlay').style.display='none';
+  lastTs=performance.now();
+  animId = requestAnimationFrame(loop);
+}
+function endGame(){
+  gs='end';
+  document.getElementById('overlay').style.display='flex';
+  document.getElementById('finalScore').style.display='block';
+  document.getElementById('finalScore').textContent=
+    `Score: ${Math.floor(score)}  ·  Diamonds: ${gems}`;
+  document.getElementById('actionBtn').textContent='Play Again';
+}
+function pause(){
+  if(gs!=='playing') return;
+  gs='paused';
+  document.getElementById('pauseOverlay').style.display='flex';
+}
+function resume(){
+  if(gs!=='paused') return;
+  cancelAnimationFrame(animId); 
+  gs='playing';
+  document.getElementById('pauseOverlay').style.display='none';
+  lastTs=performance.now();
+  animId = requestAnimationFrame(loop);
+}
+ 
+/* ─── controls ────────────────────────────── */
+document.addEventListener('keydown',e=>{
+  keys[e.key]=true;
+  if(e.key===' ') e.preventDefault();
+  if(e.key==='Escape'||e.key==='p') gs==='paused'?resume():pause();
+});
+document.addEventListener('keyup',e=>{ keys[e.key]=false; });
+canvas.addEventListener('touchstart',e=>{ keys[' ']=true; e.preventDefault(); },{passive:false});
+canvas.addEventListener('touchend',  e=>{ keys[' ']=false;e.preventDefault(); },{passive:false});
+ 
+document.getElementById('actionBtn').addEventListener('click',startGame);
+document.getElementById('pauseBtn') .addEventListener('click',()=>gs==='paused'?resume():pause());
+document.getElementById('resumeBtn').addEventListener('click',resume);
+ 
+/* ─── menu idle draw ──────────────────────── */
+(function menuLoop(ts){
+  if(gs!=='menu') return;
+  ctx.clearRect(0,0,W,H);
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,BG1); g.addColorStop(1,BG2);
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  drawGround();
+  /* demo sphere */
+  const x=SPHERE_X,y=GROUND_Y-R_BIG,r=R_BIG;
+  const sg=ctx.createRadialGradient(x-r*.25,y-r*.22,r*.1,x+r*.1,y+r*.1,r*1.05);
+  sg.addColorStop(0,SP_LIT); sg.addColorStop(.45,SP_MID); sg.addColorStop(1,SP_BASE);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=sg; ctx.fill();
+  ctx.beginPath(); ctx.arc(x-r*.30,y-r*.30,r*.18,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,245,235,0.38)'; ctx.fill();
+  requestAnimationFrame(menuLoop);
+})();
+</script>
+</body>
+</html> 
