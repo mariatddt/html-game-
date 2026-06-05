@@ -166,6 +166,7 @@ let levelUpEvent = {
   textAlpha: 0,       
   text: "Great work, don't stop now"
 };
+let wallBricks = [];
 
 /* timers */
 let tObs=0.15;
@@ -175,7 +176,7 @@ let tCloud=0.0;
 /* ─── Terrain Drop State ─── */
 const DROP_LIFT    = 80;         // px the scene rises before the drop
 const DROP_GAP_W   = 180;        // width of the floor gap
-const DROP_LOW_W   = 420;        // width of lower floor section
+const DROP_LOW_W   = 200;        // width of lower floor section
 const DROP_STEP_H  = R_BIG*2.8; // how far down the lower floor sits
 let sceneOffsetY   = 0;
 let sceneOffsetTarget = 0;
@@ -214,9 +215,11 @@ congratsSound.pause();
   for(let i=0;i<4;i++) addBlob(Math.random()*W);
   levelUpTriggered = false;
   levelUpEvent.active = false;
+  levelUpEvent._fired = false;
   levelUpEvent.yOffset = 160;
   levelUpEvent.targetY = 160;
   levelUpEvent.textAlpha = 0;
+  wallBricks = [];
 
   // 4 drops evenly spread across the game, 2 of them hole-type
   sceneOffsetY = 0; sceneOffsetTarget = 0;
@@ -253,11 +256,24 @@ function spawnObs(){
   const sx0 = W + 80;
   for(const o of obstacles){ if(o.sx + o.w + 140 > sx0) return false; }
 
+  // Block step_up/step_down only if one is already on screen, OR if the next drop is so
+  // close that a newly-spawned step (which takes ~7.6s to reach the sphere + up to 3.4s
+  // to pass = ~11s total) would still be crossing the sphere when the drop gap arrives
+  // (~9.8s after trigger). A step already past the sphere doesn't count.
+  const hasActiveStep = obstacles.some(o =>
+    (o.t === 'step_up' || o.t === 'step_down') && o.sx + o.w > SPHERE_X - 60
+  );
+  const nextDropIn = dropSchedule.length > 0 ? (dropSchedule[0].time - elapsed) : Infinity;
+  // Only block *new* spawns when a drop is so imminent a fresh step couldn't clear in time.
+  // A new step needs ~11s to fully pass the sphere; drop gap arrives ~9.8s after trigger.
+  // So block only if drop is within ~4s (step would still be mid-crossing when gap hits).
+  const stepAllowed = !hasActiveStep && nextDropIn > 4;
+
   const pool=[ 
     {t:'gate', w:45}, 
     {t:'bar_low', w:35}, 
-    {t:'step_up', w:20}, 
-    {t:'step_down', w:15} 
+    {t:'step_up', w: stepAllowed ? 20 : 0}, 
+    {t:'step_down', w: stepAllowed ? 15 : 0} 
   ];
   const tot=pool.reduce((s,a)=>s+a.w,0);
   let r=Math.random()*tot;
@@ -297,35 +313,65 @@ function spawnObs(){
 }
  
 function spawnGem(){
-  for(let i=0; i<60; i++){
-    const sx = W + 40 + Math.random() * 140;
+  const gemHalfSize = 28; // gem visual extent including rays
 
-    // Use lower floor as baseline if we're in a drop
-    let baselineY = (dropGap && worldToScreen(dropGap.gapEndWX) < sx && sx < worldToScreen(dropGap.lowFloorEndWX))
-      ? dropGap.lowY
-      : GROUND_Y;
-
+  function tryPlace(sx) {
+    let baselineY = GROUND_Y;
+    // Active drop gap (already happening)
+    if (dropGap && worldToScreen(dropGap.gapEndWX) < sx && sx < worldToScreen(dropGap.lowFloorEndWX)) {
+      baselineY = dropGap.lowY;
+    }
+    // Pending scheduled drops — gems spawned now will still be on screen when those drops fire.
+    // Reject any gem whose screen position will be inside the drop's lower section at that time.
+    for (const sched of dropSchedule) {
+      const timeUntil = sched.time - elapsed;
+      if (timeUntil < 0) continue;
+      // World x where the drop gap will start/end, converted to current screen coords.
+      // The gap starts at worldX + (W - SPHERE_X) + 300 from when it fires.
+      // In screen space right now: that world point = sx_now + timeUntil * speed * 60
+      const futureGapStartSx = W + 300; // gap always starts well off right edge, safe
+      // Simpler: just reject gems in the rightmost ~400px when a drop is within ~12s,
+      // since those gems will be mid-screen when the drop gap scrolls through.
+      if (timeUntil < 14 && sx > W - 200) return null;
+    }
     for(const o of obstacles){
       if(o.t === 'step_up' || o.t === 'step_down'){
         if(sx >= o.sx && sx <= o.sx + o.w) baselineY = o.y;
       }
     }
-
-    // Always at big-sphere hover height — always reachable without shrinking
     const y = baselineY - (R_BIG + 20);
+    if (y < 20 || y > H - 20) return null;
 
-    let overlap = false;
-    const padX = 22, padY = 22;
+    const margin = gemHalfSize + 8; // extra padding so gem never visually clips an obstacle
     for(const o of obstacles){
-      if(o.t === 'step_up' || o.t === 'step_down'){
-        if(sx+padX > o.sx && sx-padX < o.sx+o.w && y+padY > o.y){ overlap=true; break; }
-      } else {
-        if(sx+padX > o.sx && sx-padX < o.sx+o.w && y+padY > o.y && y-padY < o.y+o.h){ overlap=true; break; }
+      const gx1 = sx - margin, gx2 = sx + margin;
+      const gy1 = y  - margin, gy2 = y  + margin;
+      const ox1 = o.sx, ox2 = o.sx + o.w;
+      // bar_low / _drop bars: block from bar top all the way to floor
+      const oy1 = o.y;
+      const oy2 = (o.t === 'bar_low' || o._drop) ? H : o.y + o.h;
+      if(gx2 > ox1 && gx1 < ox2 && gy2 > oy1 && gy1 < oy2) return null;
+      // For gate pairs: also block the gap between them (the passthrough slot) so the
+      // gem never sits inside the opening. gate always has a matching gate_bottom.
+      if(o.t === 'gate' && gx2 > ox1 && gx1 < ox2) {
+        // gap runs from bottom of top-segment (o.y + o.h) to top of bottom-segment.
+        // We don't have a direct ref to gate_bottom here, but we know the gem's y
+        // must not be anywhere near the gate column at all — block the full height.
+        return null;
       }
     }
-    if(!overlap){
+    for(const c of collectibles){
+      if(!c.done && Math.abs(c.sx - sx) < 50 && Math.abs(c.y - y) < 50) return null;
+    }
+    return y;
+  }
+
+  for(let i = 0; i < 60; i++){
+    const sx = W + 40 + Math.random() * 140;
+    const y = tryPlace(sx);
+    if(y !== null){
       collectibles.push({sx, y, small:false, pulse:Math.random()*Math.PI*2, done:false});
-      break;
+      return;
     }
   }
 }
@@ -353,9 +399,10 @@ function update(dt){
 
     for(const o of obstacles) {
       if(o.t === 'bar_low' || o.t === 'gate' || o.t === 'gate_bottom') {
+        // For _drop bars: only restrict size if sphere has fallen below bar level
+        if (o._drop && sp.y < o.y + o.h) continue;
         let num = 0.6*sp.r; 
         if (o.t == 'bar_low') num = 0.3*sp.r; 
-        // Check if the sphere is horizontally inside or overlapping the obstacle channel
         if (SPHERE_X + (sp.r-num) >= o.sx && SPHERE_X - sp.r <= o.sx + o.w) {
           if (o.maxR < requiredMaxR) {
             requiredMaxR = o.maxR;
@@ -370,8 +417,10 @@ function update(dt){
 
   let activeFloorY = GROUND_Y;
   if (dropGap) {
-    const wx = worldX;
-    if (wx >= dropGap.gapStartWX && wx < dropGap.lowFloorEndWX) activeFloorY = dropGap.lowY;
+    const gapStartSx = worldToScreen(dropGap.gapStartWX);
+    const lowFloorEndSx = worldToScreen(dropGap.lowFloorEndWX);
+    // Switch floor only when the sphere (at SPHERE_X) is actually over the lower section
+    if (SPHERE_X >= gapStartSx && SPHERE_X < lowFloorEndSx) activeFloorY = dropGap.lowY;
   }
   for (const o of obstacles) {
     if (o.t === 'step_up' || o.t === 'step_down') {
@@ -410,12 +459,10 @@ function update(dt){
   for(const o of obstacles){
     if (o.t === 'step_up') {
       const sphereFront = SPHERE_X + sp.r;
-      
-      // Check if the sphere is overlapping the platform horizontally
-      if (sphereFront >= o.sx && SPHERE_X <= o.sx + o.w) {
-        // ONLY block if you are small AND your lowest point is physically below the platform's surface height.
-        // (Adding a 2px buffer ensures that minor landing calculations don't trigger a false wall crash)
-        if (sp.r <= R_SMALL + 10 && sp.y + sp.r > o.y + 2) {
+      // Big sphere rides over the step via activeFloorY — never wall-block it.
+      // Small/mid sphere can't mount the 11px step — block as a wall on approach.
+      if (sphereFront >= o.sx && SPHERE_X < o.sx && sp.r < R_BIG - 4) {
+        if (sp.y + sp.r > o.y + 2) {
           physicalBlocker = true;
           break;
         }
@@ -456,7 +503,8 @@ function update(dt){
 
     tObs -= dt; tGem -= dt;
     if(tObs <= 0){ 
-      if(dropState === 'idle' && spawnObs()) { tObs = 1.6 - prog*0.5 + Math.random()*0.5; }
+      const wallActive = wallBricks.length > 0 || (elapsed >= 88 && elapsed < 92);
+      if(dropState === 'idle' && !wallActive && spawnObs()) { tObs = 1.6 - prog*0.5 + Math.random()*0.5; }
       else { tObs = 0.1; }
     }
     if(tGem   <= 0){ spawnGem(); tGem = 4.5 + Math.random() * 3.0; }
@@ -494,15 +542,21 @@ function update(dt){
   particles.forEach(p => { p.x+=p.vx; p.y+=p.vy; p.vy+=0.15; p.life-=p.dc; });
   particles = particles.filter(p => p.life > 0);
  
+  // Mark that we've passed 90s so we know to trigger as soon as terrain is back to normal
   if (!levelUpTriggered && elapsed >= 90) {
-    levelUpTriggered = true;
+    levelUpTriggered = true; // prevents re-checking, actual event fires below
+  }
+  if (levelUpTriggered && !levelUpEvent.active && !levelUpEvent._fired &&
+      dropState === 'idle' && Math.abs(sceneOffsetY) < 2) {
+    levelUpEvent._fired = true;
     levelUpEvent.active = true;
     levelUpEvent.timer = levelUpEvent.duration;
     levelUpEvent.targetY = 0;
-    // Play the congratulatory audio cue
-    congratsSound.currentTime = 0; // Rewind to start in case it gets re-triggered
+    congratsSound.currentTime = 0;
     congratsSound.play().catch(err => console.log("Audio playback blocked by browser:", err));
-
+    // Single solid white wall, width fills from right edge to sphere position
+    const wallW = W - SPHERE_X + 20;
+    wallBricks = [{ x: W, y: 0, w: wallW, h: GROUND_Y + 14, vx:0, vy:0, alpha:1, solid:true }];
   }
   if (levelUpEvent.active) {
     levelUpEvent.timer -= dt;
@@ -514,6 +568,39 @@ function update(dt){
     }
     if (levelUpEvent.timer <= 0.5) levelUpEvent.targetY = 160;
     if (levelUpEvent.timer <= 0 && levelUpEvent.yOffset >= 155) levelUpEvent.active = false;
+  }
+
+  // update dissolving wall
+  if (wallBricks.length > 0) {
+    const s = wallBricks[0];
+    if (s && s.solid) {
+      if (!physicalBlocker) s.x -= speed;
+      if (s.x <= SPHERE_X + sp.r + 2) {
+        wallBricks = [];
+        const cols = 15, rows = 18;
+        const cW = s.w / cols, cH = s.h / rows;
+        for (let c = 0; c < cols; c++) {
+          for (let r = 0; r < rows; r++) {
+            const cx = s.x + c*cW + cW/2, cy = r*cH + cH/2;
+            const dx = cx - SPHERE_X, dy = cy - sp.y;
+            const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+            const spd = 1.5 + Math.random() * 3.5;
+            wallBricks.push({
+              x: s.x + c*cW, y: r*cH, w: cW-2, h: cH-2,
+              vx: (dx/dist)*spd + (Math.random()-0.5)*1.5,
+              vy: (dy/dist)*spd - Math.random()*2.5,
+              rot: 0, vrot: (Math.random()-0.5)*0.12,
+              alpha: 1, solid: false
+            });
+          }
+        }
+      }
+    } else {
+      for (const b of wallBricks) {
+        b.x+=b.vx; b.y+=b.vy; b.vy+=0.18; b.rot+=b.vrot; b.alpha-=0.012;
+      }
+      wallBricks = wallBricks.filter(b => b.alpha > 0);
+    }
   }
 
   // ─── Terrain Drop Logic ───
@@ -534,7 +621,7 @@ function update(dt){
       // Sphere rolls ON TOP of it smoothly. Hole in the middle: small sphere falls through to diamond.
       const lowFloorY = GROUND_Y + DROP_STEP_H;
       const barH   = 14;
-      const barY   = GROUND_Y; // flush with terrain — sphere glides straight onto it
+      const barY   = GROUND_Y + barH; // slightly below terrain surface so left bar merges in
       const gapScreenX = W + 300;
       const holeW  = R_SMALL * 2 + 19;
       const holeScreenX = gapScreenX + DROP_GAP_W / 2;
@@ -542,16 +629,23 @@ function update(dt){
       const leftSx = gapScreenX;
       const leftW  = holeScreenX - holeW / 2 - leftSx;
       const rightSx = holeScreenX + holeW / 2;
-      const rightW = 180 - holeW / 2;
+      const rightW = 150 - holeW / 2;  // 30px shorter than before
+      // maxR for right bar: max sphere radius that fits in the gap below it (lower floor to bar bottom)
+      const rightMaxR = Math.floor((lowFloorY - (barY + barH)) / 2) - 2;
       const maxR   = R_BIG;
-      const leftBar  = {t:'bar_low', sx:leftSx,  y:barY, w:leftW,  h:barH, maxR, _drop:true};
-      const rightBar = {t:'bar_low', sx:rightSx, y:barY, w:rightW, h:barH, maxR, _drop:true};
+      const leftBar  = {t:'bar_low', sx:leftSx,  y:barY, w:leftW,  h:barH, maxR, _drop:true, _isLeft:true};
+      const rightBar = {t:'bar_low', sx:rightSx, y:barY, w:rightW, h:barH, maxR:rightMaxR, _drop:true, _isLeft:false};
       obstacles.push(leftBar);
       obstacles.push(rightBar);
       dropGap.holeBarY = barY;
       dropGap.holeW = holeW;
       // Diamond on the lower floor, under the right bar — only reachable if sphere fell through the hole
-      collectibles.push({sx: rightSx + rightW/2, y: lowFloorY - R_SMALL - 12, small:true, pulse:Math.random()*Math.PI*2, done:false});
+      const dsx = rightSx + rightW/2, dy = lowFloorY - R_SMALL - 12;
+      let dOverlap = false;
+      for (const o of obstacles) {
+        if (dsx + 14 > o.sx && dsx - 14 < o.sx + o.w && dy + 14 > o.y && dy - 14 < o.y + o.h) { dOverlap = true; break; }
+      }
+      if (!dOverlap) collectibles.push({sx: dsx, y: dy, small:true, pulse:Math.random()*Math.PI*2, done:false});
     }
   }
 
@@ -617,8 +711,9 @@ function drawGround(){
     ctx.fillRect(0,        GROUND_Y+14, gapStartSx, 4);
     ctx.fillRect(gapEndSx, lowY+14,     W-gapEndSx, 4);
   } else {
+    const wallEdgeX = (wallBricks.length > 0 && wallBricks[0].solid) ? wallBricks[0].x : W;
     ctx.fillStyle='#ffffff'; ctx.fillRect(0,GROUND_Y+14,W,H-GROUND_Y-14); ctx.restore(); ctx.save();
-    ctx.fillStyle='rgba(230,168,78,0.18)'; ctx.fillRect(0,GROUND_Y+14,W,4);
+    ctx.fillStyle='rgba(230,168,78,0.18)'; ctx.fillRect(0,GROUND_Y+14, wallEdgeX, 4);
   }
   ctx.restore();
 }
@@ -649,10 +744,33 @@ function drawObstacles(renderPlatformsOnly){
     }
 
     ctx.shadowColor='rgba(0,0,0,0.12)'; ctx.shadowBlur=8; ctx.shadowOffsetY=3;
-    ctx.fillStyle='#ffffff'; ctx.beginPath();
-    if(ctx.roundRect) ctx.roundRect(sx,o.y,o.w,o.h,4); else ctx.rect(sx,o.y,o.w,o.h);
-    ctx.fill(); ctx.shadowBlur=0;
-    ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.fillRect(sx+4,o.y+2,o.w-8,3);
+    ctx.fillStyle='#ffffff';
+
+    if (o._drop) {
+      // Tilt toward the hole: the inner edge (facing the hole) dips down, outer edge stays level
+      // Left bar: right side tilts down; Right bar: left side tilts down
+      const tilt = o.h * 0.55; // how much the inner edge dips
+      ctx.beginPath();
+      if (o._isLeft) {
+        // left bar — right edge tilts down toward hole
+        ctx.moveTo(sx,        o.y);
+        ctx.lineTo(sx + o.w,  o.y + tilt);
+        ctx.lineTo(sx + o.w,  o.y + o.h + tilt);
+        ctx.lineTo(sx,        o.y + o.h);
+      } else {
+        // right bar — left edge tilts down toward hole
+        ctx.moveTo(sx,        o.y + tilt);
+        ctx.lineTo(sx + o.w,  o.y);
+        ctx.lineTo(sx + o.w,  o.y + o.h);
+        ctx.lineTo(sx,        o.y + o.h + tilt);
+      }
+      ctx.closePath(); ctx.fill(); ctx.shadowBlur=0;
+    } else {
+      ctx.beginPath();
+      if(ctx.roundRect) ctx.roundRect(sx,o.y,o.w,o.h,4); else ctx.rect(sx,o.y,o.w,o.h);
+      ctx.fill(); ctx.shadowBlur=0;
+      ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.fillRect(sx+4,o.y+2,o.w-8,3);
+    }
      
     if(o.maxR < R_BIG && o.sx<420 && o.sx>-o.w){
       const a=clamp((420-o.sx)/260,0,1);
@@ -753,20 +871,42 @@ function draw(ts){
   ctx.save();
   ctx.translate(0, sceneOffsetY);
 
-  drawGround(); 
   drawObstacles(true); 
   drawTrail(); 
+  drawObstacles(false);
   drawGems(ts/1000); 
   drawSphere(); 
   drawParticles(); 
-  drawObstacles(false);
+  
+  drawWall();
+  drawGround();
 
   ctx.restore();
   drawGroundBottomFill();
-  
   if (levelUpEvent.active) drawEncouragementMascot(ts / 1000);
 }
  
+function drawWall(){
+  if (wallBricks.length === 0) return;
+  ctx.save();
+  for (const b of wallBricks) {
+    ctx.globalAlpha = Math.max(0, b.alpha);
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = 'rgba(0,0,0,0.10)'; ctx.shadowBlur = 6;
+    if (b.solid) {
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    } else {
+      ctx.save();
+      ctx.translate(b.x + b.w/2, b.y + b.h/2);
+      ctx.rotate(b.rot);
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(-b.w/2, -b.h/2, b.w, b.h, 3); ctx.fill(); }
+      else ctx.fillRect(-b.w/2, -b.h/2, b.w, b.h);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
 function drawEncouragementMascot(timeSecs) {
   const baseX = 90; const baseY = H - 66 + levelUpEvent.yOffset; const bounceY = 4 * Math.sin(timeSecs * 7); const squishX = 1 + 0.03 * Math.sin(timeSecs * 7);
   ctx.save(); ctx.translate(baseX, baseY + bounceY); ctx.scale(squishX, 1 - (squishX - 1));
